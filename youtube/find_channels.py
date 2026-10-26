@@ -20,10 +20,6 @@ EXCLUDE_NAMES = ["ヒカル", "HikakinTV", "HIKAKIN", "はじめしゃちょー"
                  "テレビ朝日", "フジテレビ", "NHK", "ANN", "FNN", "ジャニーズ", "STARTO",
                  "avex", "Sony Music", "VEVO"]
 
-QUERIES = ["", "vlog", "ゲーム実況", "切り抜き", "料理", "検証", "ドッキリ", "解説", "ショート",
-           "猫", "犬", "釣り", "キャンプ", "メイク", "大食い", "ASMR", "マイクラ", "雑学",
-           "スカッと", "漫画", "アニメ", "歌ってみた", "カップル", "家族", "車", "筋トレ"]
-
 
 def get(endpoint, **params):
     params["key"] = KEY
@@ -41,7 +37,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--min-views", type=int, default=2_000_000)
     ap.add_argument("--max-subs", type=int, default=1_000_000, help="これ以上の登録者は有名として除外")
-    ap.add_argument("--pages", type=int, default=2, help="1クエリあたりの検索ページ数 (1ページ=100ユニット)")
+    ap.add_argument("--pages", type=int, default=3, help="1日あたりの検索ページ数 (1ページ=50件=100ユニット、30日×3ページ=9000ユニット)")
     ap.add_argument("--region", default="JP")
     ap.add_argument("--out", default="channels.csv")
     a = ap.parse_args()
@@ -67,13 +63,16 @@ def main():
             token = r.get("nextPageToken")
             if not token: break
 
-    # 2) 直近30日の再生数順検索: 100ユニット/回
-    for q in QUERIES:
+    # 2) キーワードなしで、直近30日を1日ずつ区切って「その日に投稿された動画の再生数上位」を取る
+    #    (検索は1回あたり最大500件までなので、日ごとに分けて取りこぼしを減らす。100ユニット/ページ)
+    now = datetime.now(timezone.utc)
+    for d in range(30):
+        start = (now - timedelta(days=d + 1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end = (now - timedelta(days=d)).strftime("%Y-%m-%dT%H:%M:%SZ")
         token = None
         for _ in range(a.pages):
-            p = dict(part="id", type="video", order="viewCount", publishedAfter=since,
-                     regionCode=a.region, relevanceLanguage="ja", maxResults=50)
-            if q: p["q"] = q
+            p = dict(part="id", type="video", order="viewCount", publishedAfter=start,
+                     publishedBefore=end, regionCode=a.region, relevanceLanguage="ja", maxResults=50)
             if token: p["pageToken"] = token
             r = get("search", **p)
             video_ids.update(i["id"]["videoId"] for i in r["items"])
