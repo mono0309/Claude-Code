@@ -7,7 +7,7 @@
 注意: YouTube Data API ではチャンネルの「期間別再生数」は取れないため、
 「直近30日に投稿された動画の再生数合計」で近似している。
 """
-import argparse, csv, json, os, sys, urllib.parse, urllib.request
+import argparse, csv, json, os, re, sys, urllib.parse, urllib.request
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -28,6 +28,13 @@ def get(endpoint, **params):
         return json.load(r)
 
 
+def duration_sec(iso):
+    m = re.fullmatch(r"P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", iso)
+    if not m: return 0
+    d, h, mi, se = (int(x or 0) for x in m.groups())
+    return d * 86400 + h * 3600 + mi * 60 + se
+
+
 def chunks(xs, n=50):
     for i in range(0, len(xs), n):
         yield xs[i:i + n]
@@ -35,7 +42,9 @@ def chunks(xs, n=50):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--min-views", type=int, default=2_000_000)
+    ap.add_argument("--min-views", type=int, default=3_000_000)
+    ap.add_argument("--per-video", action="store_true", help="合計ではなく1本の動画で --min-views を超えたチャンネルに絞る")
+    ap.add_argument("--no-shorts", action="store_true", help="3分以下の動画(ショート)を除外")
     ap.add_argument("--max-subs", type=int, default=1_000_000, help="これ以上の登録者は有名として除外")
     ap.add_argument("--pages", type=int, default=3, help="1日あたりの検索ページ数 (1ページ=50件=100ユニット、30日×3ページ=9000ユニット)")
     ap.add_argument("--region", default="JP")
@@ -83,8 +92,10 @@ def main():
     # 3) 動画の再生数を取得し、30日以内の動画をチャンネル別に集計
     ch_views, ch_count, ch_top = defaultdict(int), defaultdict(int), {}
     for ids in chunks(list(video_ids)):
-        for v in get("videos", part="snippet,statistics", id=",".join(ids))["items"]:
+        for v in get("videos", part="snippet,statistics,contentDetails", id=",".join(ids))["items"]:
             if v["snippet"]["publishedAt"] < since:
+                continue
+            if a.no_shorts and duration_sec(v["contentDetails"].get("duration", "")) <= 180:
                 continue
             cid, views = v["snippet"]["channelId"], int(v["statistics"].get("viewCount", 0))
             ch_views[cid] += views
@@ -93,7 +104,8 @@ def main():
                 ch_top[cid] = (v["snippet"]["title"], views)
 
     # 4) チャンネル情報で有名どころを除外
-    cands = [c for c, n in ch_views.items() if n >= a.min_views]
+    score = {c: ch_top[c][1] for c in ch_top} if a.per_video else ch_views
+    cands = [c for c, n in score.items() if n >= a.min_views]
     rows = []
     for ids in chunks(cands):
         for ch in get("channels", part="snippet,statistics", id=",".join(ids))["items"]:
@@ -105,12 +117,12 @@ def main():
                              views_30d_new_videos=ch_views[ch["id"]], videos_30d=ch_count[ch["id"]],
                              top_video=ch_top[ch["id"]][0], top_video_views=ch_top[ch["id"]][1],
                              url=f"https://www.youtube.com/channel/{ch['id']}"))
-    rows.sort(key=lambda r: -r["views_30d_new_videos"])
+    rows.sort(key=lambda r: -(r["top_video_views"] if a.per_video else r["views_30d_new_videos"]))
     with open(a.out, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ["channel"])
         w.writeheader(); w.writerows(rows)
     for r in rows:
-        print(f'{r["views_30d_new_videos"]:>12,}  登録者{r["subscribers"]:>9,}  {r["channel"]}  {r["url"]}')
+        print(f'{r["top_video_views"]:>12,}  登録者{r["subscribers"]:>9,}  {r["channel"]}  「{r["top_video"]}」  {r["url"]}')
     print(f"\n{len(rows)} チャンネル → {a.out}", file=sys.stderr)
 
 
